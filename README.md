@@ -1,206 +1,111 @@
-# FN MySQL Proxy - minimal runnable demo
+# FN MySQL Transparent Proxy
 
-这是一个最小的 MySQL Wire Protocol 透明代理 Demo。
-
-目标：
-
-- 用户仍然使用标准 `mysql` 客户端登录；
-- 代理监听 `3307`，后端真实 MySQL 默认为 `127.0.0.1:3306`；
-- 握手、认证、普通 SQL、结果集全部透明转发；
-- 只检查 `COM_QUERY (0x03)`；
-- SQL 第一个关键字是 `NF` 或 `FN` 时，不转发给 MySQL，而是直接返回 MySQL `ERR_Packet`；
-- 普通 SQL 原样放行。
-
-## 架构
+一个最小可运行的 C++17 MySQL TCP 透明代理：
 
 ```text
-mysql client
-    |
-    | MySQL Wire Protocol
-    v
-FN Proxy :3307
-    |
-    |-- NF/FN ...  --> ERR_Packet（拦截）
-    |
-    `-- other SQL  --> transparent forwarding
-                         |
-                         v
-                    MySQL :3306
+MySQL Client  <---- TCP byte stream ---->  FN Proxy  <---- TCP byte stream ---->  MySQL Server
+                                            :13306                              :3306
 ```
 
-## 为什么这个 Demo 不需要 libmysqlclient
+当前版本不理解 MySQL 协议，也不会修改数据。Handshake、认证、SQL 命令、结果集和可选 TLS 都由客户端与真实 MySQL Server 端到端完成。代理只负责异步、全双工地搬运 TCP 字节。
 
-因为它不是“程序调用 MySQL API”，而是一个真正的 TCP/MySQL 协议代理。
+## 依赖与编译
 
-代理直接透传真实 MySQL 的：
-
-- Handshake
-- Authentication
-- COM_QUERY
-- ResultSet
-- COM_INIT_DB
-- COM_PING
-- COM_QUIT
-- 其他未解析的数据包
-
-这使得用户侧体验接近 ShardingSphere-Proxy：客户端连接的是代理端口，而不是修改应用代码去调用某个 SDK。
-
-## 编译
-
-Linux / WSL Ubuntu：
+Ubuntu / Debian：
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake
+sudo apt install -y build-essential cmake libboost-system-dev
 
-mkdir build
-cd build
-cmake ..
-cmake --build . -j
+cmake -S . -B build
+cmake --build build -j
 ```
 
-也可以直接：
+生成的程序是 `build/fn_proxy`。
 
-```bash
-g++ -std=c++17 -O2 -pthread src/main.cpp -o fn_proxy
-```
+## 启动
 
-## 运行
-
-假设真实 MySQL：
-
-```text
-127.0.0.1:3306
-```
-
-启动代理：
+使用默认配置（监听 `0.0.0.0:13306`，连接 `127.0.0.1:3306`）：
 
 ```bash
 ./build/fn_proxy
 ```
 
-等价于：
+完整参数：
 
 ```bash
-./build/fn_proxy 3307 127.0.0.1 3306
+./build/fn_proxy \
+  --listen-host 0.0.0.0 \
+  --listen-port 13306 \
+  --mysql-host 127.0.0.1 \
+  --mysql-port 3306
 ```
 
-参数顺序：
-
-```text
-fn_proxy <listen_port> <backend_host> <backend_port>
-```
-
-## 使用标准 mysql 客户端登录代理
+查看帮助：
 
 ```bash
-mysql -h127.0.0.1 -P3307 -uroot -p --protocol=TCP
+./build/fn_proxy --help
 ```
 
-代理会转发真实 MySQL 的握手和认证，所以用户名/密码仍然是 MySQL 自己验证。
+`--listen-host` 当前应为数字形式的 IPv4/IPv6 地址；`--mysql-host` 可以是 IP 或可解析的主机名。
 
-Demo 会从服务端握手 capability 中清除 `CLIENT_SSL`，防止客户端与 MySQL 建立 TLS 后导致代理看不到明文 SQL。因此它仅适合作为本地研究 Demo，不适合生产环境。
+## 使用真实 MySQL 测试
 
-## 测试普通 SQL：放行
+先确认 MySQL 正在 `127.0.0.1:3306` 监听，再通过代理连接：
+
+```bash
+mysql -h 127.0.0.1 -P 13306 -u root -p --protocol=TCP
+```
+
+登录后可执行完整的读写测试：
 
 ```sql
-SELECT VERSION();
 SHOW DATABASES;
-USE test;
-CREATE TABLE t_demo(id INT PRIMARY KEY);
-SELECT * FROM t_demo;
+CREATE DATABASE fn_test;
+USE fn_test;
+CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50));
+INSERT INTO users VALUES (1, 'Alice');
+SELECT * FROM users;
+UPDATE users SET name = 'Bob' WHERE id = 1;
+DELETE FROM users WHERE id = 1;
+SHOW TABLES;
+DROP DATABASE fn_test;
 ```
 
-代理日志会出现类似：
+所有行为应与直连 `3306` 相同。代理日志会显示连接建立、断开以及每次实际转发的字节数。
+
+## 无 MySQL 环境的冒烟测试
+
+仓库内的 Python 测试会启动一个假的 TCP/MySQL 后端，验证：
+
+- 后端首先发送的数据能到达客户端；
+- Handshake 中的 capability 字节没有被改写；
+- 客户端数据按原样到达后端，包括 `NF` 开头的数据；
+- 超过 8192 字节的数据与刻意拆分的 TCP 写入仍可正确转发。
+
+```bash
+python3 tests/smoke_fake_mysql.py
+```
+
+## 代码结构与职责
 
 ```text
-[PASS] SELECT VERSION()
-[PASS] SHOW DATABASES
+main
+  `-- ProxyServer
+        `-- one ProxySession per client
+              |-- client_socket
+              `-- backend_socket
 ```
 
-MySQL 正常返回结果。
+- `Config`：保存默认配置并解析少量命令行参数。
+- `ProxyServer`：创建监听 socket、持续异步 accept，并为每个客户端创建一个 `ProxySession`。
+- `ProxySession`：解析后端地址、连接 MySQL，并维护两条彼此独立的异步链：`client read -> backend write -> client read` 与 `backend read -> client write -> backend read`。
+- `main`：组装对象、处理退出信号并运行单线程 `io_context` 事件循环。
 
-## 测试 NF/FN SQL：拦截
+每个方向只有前一批数据写完后才会复用对应 buffer，因此 buffer 不会被未完成的异步写覆盖。两个方向使用不同 buffer，可以并行推进。所有异步回调都捕获 `shared_from_this()` 得到的 `self`，保证 Session 存活到回调完成；任一方向失败都会幂等地关闭两端 socket。
 
-```sql
-NF SET MODE 2NF;
-```
+## 当前边界与下一阶段
 
-或者：
+当前代码故意不做 MySQL Packet 重组、SQL 解析、认证处理、连接池或 TLS 解密。`async_read_some()` 返回的内容可能是半个包、一个包或多个包，都会按实际字节数直接转发。
 
-```sql
-FN TEST;
-```
-
-客户端应该收到类似：
-
-```text
-ERROR 1105 (HY000): [FN Proxy] NF/FN statement intercepted by middleware demo
-```
-
-代理日志：
-
-```text
-[INTERCEPT] NF SET MODE 2NF
-```
-
-该 SQL 不会发送给真实 MySQL。
-
-## 关键代码路径
-
-客户端 -> Proxy：
-
-```text
-read MySQL packet
-    |
-    v
-payload[0] == 0x03 ?       # COM_QUERY
-    |
-    +-- no  --> backend
-    |
-    `-- yes
-         |
-         v
-      read SQL text
-         |
-         v
-      first keyword
-       /       \
-   NF / FN     other
-      |          |
-      v          v
- ERR_Packet    backend
-```
-
-## 当前故意没有实现的内容
-
-这是 v0.0 wire-proxy demo，不是完整 MySQL Proxy。暂不处理：
-
-- 完整 MySQL Protocol 状态机
-- TLS MITM
-- 多包超大 SQL 的逻辑拼接
-- Prepared Statement (`COM_STMT_PREPARE`) 中的 NF 检测
-- SQL Parser / AST
-- NF DSL Parser
-- FD Engine
-- 2NF / 3NF / BCNF
-- Connection Pool
-- Transaction Pinning
-- Backend failover
-
-下一步最合理的演进是：
-
-```text
-现在：
-NF/FN prefix -> reject
-
-下一版：
-NF/FN prefix
-    -> NF Lexer
-    -> NF Parser
-    -> NFCommand AST
-    -> MetadataManager
-    -> FD/NF Engine
-```
-
-普通 MySQL SQL 仍走 Fast Path 透明转发。
+下一阶段需要拦截 MySQL 包时，应在 `ProxySession` 的 read 完成与对应 write 开始之间接入独立的 `MySQLPacketInterceptor`。该组件必须自行维护跨 read 的重组状态，并在完整逻辑包可用后才检查内容；`ProxyServer` 仍只负责接入连接。若连接启用 TLS，则不能直接查看其中的 SQL，除非明确设计 TLS 终止方案。

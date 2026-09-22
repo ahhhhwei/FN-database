@@ -1,1 +1,1 @@
-/usr/bin/c++     CMakeFiles/fn_proxy.dir/src/main.cpp.o  -o fn_proxy  -lpthread 
+/usr/bin/c++ CMakeFiles/fn_proxy.dir/src/main.cpp.o CMakeFiles/fn_proxy.dir/src/config.cpp.o CMakeFiles/fn_proxy.dir/src/proxy_server.cpp.o CMakeFiles/fn_proxy.dir/src/proxy_session.cpp.o -o fn_proxy  /usr/lib/x86_64-linux-gnu/libboost_system.so.1.71.0 -lpthread 
