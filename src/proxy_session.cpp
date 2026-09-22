@@ -158,13 +158,11 @@ namespace fn
         }
         if (error == boost::asio::error::eof)
         {
-            std::cout << "[INFO] " << operation << ": peer closed the connection (" << client_name_
-                      << ")\n";
+            std::cout << "[INFO] " << operation << ": peer closed the connection (" << client_name_ << ")\n";
         }
         else
         {
-            std::cerr << "[ERROR] " << operation << " failed for " << client_name_ << ": "
-                      << error.message() << '\n';
+            std::cerr << "[ERROR] " << operation << " failed for " << client_name_ << ": " << error.message() << '\n';
         }
         close();
     }
