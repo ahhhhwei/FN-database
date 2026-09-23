@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fn/config.h"
+#include "fn/protocol/mysql_packet_codec.h"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -30,6 +31,10 @@ private:
     void writeToBackend(std::size_t length);
     void writeToClient(std::size_t length);
 
+    void inspectClientBytes(std::size_t length);
+    void inspectBackendBytes(std::size_t length);
+    void inspectQuery(const std::vector<std::uint8_t>& payload);
+
     void handleError(const char* operation, const boost::system::error_code& error);
     void close();
 
@@ -44,6 +49,11 @@ private:
 
     Config config_;
     std::string client_name_;
+    protocol::MysqlPacketDecoder client_packet_decoder_;
+    protocol::MysqlPacketDecoder backend_packet_decoder_;
+    bool backend_handshake_seen_ = false;
+    bool command_phase_ = false;
+    bool inspection_disabled_ = false;
     bool closed_ = false;
 };
 

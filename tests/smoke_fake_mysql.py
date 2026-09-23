@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end smoke test for the byte-transparent proxy (stdlib only)."""
 
+import os
 import socket
 import struct
 import subprocess
@@ -9,7 +10,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PROXY = ROOT / "build" / "fn_proxy"
+PROXY = Path(os.environ.get("FN_PROXY_TEST_BINARY", ROOT / "build" / "fn_proxy"))
 
 
 def unused_port():
@@ -193,3 +194,5 @@ finally:
         output, _ = process.communicate()
     print("--- proxy log ---")
     print(output)
+
+assert "Parsed FN SQL" in output, "proxy did not parse the FN COM_QUERY packet"

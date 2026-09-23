@@ -1,5 +1,7 @@
 #include "fn/proxy_session.h"
 
+#include "fn/sql/parser.h"
+
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/error.hpp>
@@ -8,12 +10,16 @@
 
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace fn
 {
     namespace
     {
+        constexpr std::uint8_t com_query = 0x03;
+        constexpr std::uint32_t client_ssl = 0x00000800U;
+
         std::string endpointName(const boost::asio::ip::tcp::endpoint &endpoint)
         {
             return endpoint.address().to_string() + ':' + std::to_string(endpoint.port());
@@ -84,6 +90,7 @@ namespace fn
                     self->handleError("read from client", error);
                     return;
                 }
+                self->inspectClientBytes(length);
                 // 读到的数据发给 MySQL
                 self->writeToBackend(length);
             });
@@ -106,6 +113,7 @@ namespace fn
                     self->handleError("read from backend", error);
                     return;
                 }
+                self->inspectBackendBytes(length);
                 // 发送给客户端
                 self->writeToClient(length);
             });
@@ -148,6 +156,93 @@ namespace fn
                 // 等待 MySQL
                 self->readFromBackend();
             });
+    }
+
+    void ProxySession::inspectClientBytes(std::size_t length)
+    {
+        if (inspection_disabled_)
+        {
+            return;
+        }
+
+        for (const auto &packet : client_packet_decoder_.feed(client_buffer_.data(), length))
+        {
+            if (!command_phase_)
+            {
+                // An SSLRequest is a 32-byte handshake response whose capability
+                // flags include CLIENT_SSL. Everything after it is encrypted, so
+                // this demo inspector must stop looking at the byte stream.
+                if (backend_handshake_seen_ && packet.payload.size() == 32)
+                {
+                    const std::uint32_t capabilities =
+                        static_cast<std::uint32_t>(packet.payload[0]) |
+                        (static_cast<std::uint32_t>(packet.payload[1]) << 8U) |
+                        (static_cast<std::uint32_t>(packet.payload[2]) << 16U) |
+                        (static_cast<std::uint32_t>(packet.payload[3]) << 24U);
+                    if ((capabilities & client_ssl) != 0)
+                    {
+                        inspection_disabled_ = true;
+                        client_packet_decoder_.reset();
+                        backend_packet_decoder_.reset();
+                        std::cout << "[INFO] TLS requested; SQL inspection disabled for "
+                                  << client_name_ << '\n';
+                        return;
+                    }
+                }
+                continue;
+            }
+
+            inspectQuery(packet.payload);
+        }
+    }
+
+    void ProxySession::inspectBackendBytes(std::size_t length)
+    {
+        if (inspection_disabled_ || command_phase_)
+        {
+            return;
+        }
+
+        for (const auto &packet : backend_packet_decoder_.feed(backend_buffer_.data(), length))
+        {
+            if (!backend_handshake_seen_)
+            {
+                backend_handshake_seen_ = true;
+                continue;
+            }
+
+            // A server OK packet marks the end of the authentication exchange.
+            // Auth switch and auth-more-data packets deliberately keep inspection
+            // in the authentication phase until the final OK arrives.
+            if (!packet.payload.empty() && packet.payload.front() == 0x00)
+            {
+                command_phase_ = true;
+                backend_packet_decoder_.reset();
+                return;
+            }
+        }
+    }
+
+    void ProxySession::inspectQuery(const std::vector<std::uint8_t> &payload)
+    {
+        if (payload.empty() || payload.front() != com_query)
+        {
+            return;
+        }
+
+        const auto *sql_data = reinterpret_cast<const char *>(payload.data() + 1);
+        const std::string_view sql_text(sql_data, payload.size() - 1);
+        const sql::ParseResult result = sql::parse(sql_text);
+        if (result.status == sql::ParseStatus::success)
+        {
+            std::cout << "[INFO] Parsed FN SQL from " << client_name_ << ": "
+                      << sql::describe(*result.statement) << '\n';
+        }
+        else if (result.status == sql::ParseStatus::error)
+        {
+            std::cerr << "[WARN] Invalid FN SQL from " << client_name_ << " at byte "
+                      << result.error_offset << ": " << result.error_message << '\n';
+        }
     }
 
     void ProxySession::handleError(const char *operation, const boost::system::error_code &error)

@@ -16,7 +16,30 @@ graph TD
 ```
 
 ## 范式相关 SQL 语法
-todo
+
+当前实现是解析器 demo：代理会从 MySQL `COM_QUERY` 数据包中识别以下语句，输出结构化解析日志，然后仍将原始数据原样转发给 MySQL。执行范式算法和在代理中生成结果集尚未实现，因此 MySQL 后端可能会把这些自定义语句报告为语法错误。
+
+`FN` 和 `NF` 可以互换，关键字不区分大小写：
+
+```sql
+FN SET MODE 2NF;
+
+FN DEPENDENCY users (id) -> (name, email);
+FN DEPENDENCY ON sales.orders (tenant_id, id) -> (amount, status);
+
+FN ANALYZE users;
+
+FN DECOMPOSE users TO 3NF;
+FN DECOMPOSE users TO BCNF;
+```
+
+表名和列名支持 MySQL 反引号，例如：
+
+```sql
+FN DEPENDENCY ON `sales`.`orders` (`tenant_id`, `id`) -> (`amount`);
+```
+
+普通 MySQL SQL 不进入 FN 解析器，继续透明转发。TLS 连接建立后数据已加密，当前代理也会自动停止 SQL 检查并继续透明转发。
 
 ## 依赖与编译
 
@@ -82,5 +105,4 @@ DROP DATABASE fn_test;
 ```
 
 所有行为应与直连 `3306` 相同。代理日志会显示连接建立、断开以及每次实际转发的字节数。
-
 
