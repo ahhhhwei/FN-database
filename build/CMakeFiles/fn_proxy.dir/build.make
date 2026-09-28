@@ -141,6 +141,9 @@ fn_proxy: CMakeFiles/fn_proxy.dir/src/proxy_server.cpp.o
 fn_proxy: CMakeFiles/fn_proxy.dir/src/proxy_session.cpp.o
 fn_proxy: CMakeFiles/fn_proxy.dir/build.make
 fn_proxy: /usr/lib/x86_64-linux-gnu/libboost_system.so.1.71.0
+fn_proxy: libfn_protocol.a
+fn_proxy: libfn_sql.a
+fn_proxy: libantlr4_runtime.a
 fn_proxy: CMakeFiles/fn_proxy.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/root/Desktop/FN-database/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Linking CXX executable fn_proxy"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/fn_proxy.dir/link.txt --verbose=$(VERBOSE)

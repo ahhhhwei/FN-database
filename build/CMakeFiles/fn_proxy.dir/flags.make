@@ -6,5 +6,5 @@ CXX_DEFINES = -DBOOST_ALL_NO_LIB -DBOOST_SYSTEM_DYN_LINK
 
 CXX_INCLUDES = -I/root/Desktop/FN-database/include
 
-CXX_FLAGS = -std=c++17 -Wall -Wextra -Wpedantic
+CXX_FLAGS = -O3 -DNDEBUG -std=c++17 -Wall -Wextra -Wpedantic -pthread
 

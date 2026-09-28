@@ -5,40 +5,24 @@
 #include <string>
 #include <string_view>
 #include <variant>
-#include <vector>
 
 namespace fn::sql {
 
-enum class NormalForm {
-    first,
+enum class NFMode {
     second,
     third,
     boyce_codd,
+    off,
 };
 
 struct SetModeStatement {
-    NormalForm mode;
+    NFMode mode;
 };
 
-struct DependencyStatement {
-    std::string table;
-    std::vector<std::string> determinants;
-    std::vector<std::string> dependents;
-};
-
-struct AnalyzeStatement {
-    std::string table;
-};
-
-struct DecomposeStatement {
-    std::string table;
-    NormalForm target;
-};
+struct ShowModeStatement {};
 
 using Statement = std::variant<SetModeStatement,
-                               DependencyStatement,
-                               AnalyzeStatement,
-                               DecomposeStatement>;
+                               ShowModeStatement>;
 
 enum class ParseStatus {
     not_fn_statement,
@@ -53,14 +37,12 @@ struct ParseResult {
     std::string error_message;
 };
 
-// Demo grammar (keywords are case-insensitive, FN and NF are aliases):
-//   FN SET MODE <1NF|2NF|3NF|BCNF>
-//   FN DEPENDENCY [ON] <table> (<column>, ...) -> (<column>, ...)
-//   FN ANALYZE <table>
-//   FN DECOMPOSE <table> [TO] <3NF|BCNF>
+// Supported custom SQL (keywords are case-insensitive):
+//   SET NF_MODE = <2NF|3NF|BCNF|OFF>;
+//   SHOW NF_MODE;
 [[nodiscard]] ParseResult parse(std::string_view sql);
 
-[[nodiscard]] std::string_view normalFormName(NormalForm normal_form);
+[[nodiscard]] std::string_view nfModeName(NFMode mode);
 [[nodiscard]] std::string describe(const Statement& statement);
 
 }  // namespace fn::sql

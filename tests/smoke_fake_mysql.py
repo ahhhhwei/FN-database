@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end smoke test for the byte-transparent proxy (stdlib only)."""
+"""End-to-end smoke test for pass-through SQL and local NF commands."""
 
 import os
 import socket
@@ -11,6 +11,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROXY = Path(os.environ.get("FN_PROXY_TEST_BINARY", ROOT / "build" / "fn_proxy"))
+
+CLIENT_PROTOCOL_41 = 0x00000200
+CLIENT_SECURE_CONNECTION = 0x00008000
+CLIENT_DEPRECATE_EOF = 0x01000000
+CLIENT_OPTIONAL_RESULTSET_METADATA = 0x02000000
+CLIENT_QUERY_ATTRIBUTES = 0x08000000
+CLIENT_CAPABILITIES = (
+    CLIENT_PROTOCOL_41
+    | CLIENT_SECURE_CONNECTION
+    | CLIENT_DEPRECATE_EOF
+    | CLIENT_OPTIONAL_RESULTSET_METADATA
+    | CLIENT_QUERY_ATTRIBUTES
+)
 
 
 def unused_port():
@@ -83,6 +96,24 @@ def ok_packet(sequence_id):
     return packet(sequence_id, b"\x00\x00\x00\x02\x00\x00\x00")
 
 
+def fake_auth_response():
+    payload = bytearray()
+    payload += struct.pack("<I", CLIENT_CAPABILITIES)
+    payload += struct.pack("<I", 0x00FFFFFF)
+    payload += b"\x2d"
+    payload += b"\x00" * 23
+    payload += b"smoke-test\x00"
+    payload += b"\x00"
+    return bytes(payload)
+
+
+def query_packet(query):
+    # With CLIENT_QUERY_ATTRIBUTES negotiated, COM_QUERY carries two
+    # length-encoded counters before the SQL text. The mysql CLI sends 0
+    # parameters and one parameter set when no attributes were supplied.
+    return packet(0, b"\x03\x00\x01" + query)
+
+
 seen_queries = []
 backend_ready = threading.Event()
 backend_done = threading.Event()
@@ -103,7 +134,7 @@ def backend_thread():
 
                 sequence_id, auth_payload = recv_packet(connection)
                 assert sequence_id == 1
-                assert auth_payload == b"dummy-auth-response"
+                assert auth_payload == fake_auth_response()
                 send_fragmented(connection, ok_packet(2))
 
                 while True:
@@ -164,25 +195,56 @@ try:
         )
         assert low_capabilities & 0x0800, "CLIENT_SSL was unexpectedly removed"
 
-        send_fragmented(client, packet(1, b"dummy-auth-response"))
+        send_fragmented(client, packet(1, fake_auth_response()))
         _, auth_ok = recv_packet(client)
         assert auth_ok[0] == 0x00
 
-        queries = [
+        ordinary_queries = [
             b"SELECT 1",
-            b"NF SET MODE 2NF",
             b"SELECT '" + (b"x" * 20000) + b"'",
         ]
-        for query in queries:
-            send_fragmented(client, packet(0, b"\x03" + query))
-            _, response = recv_packet(client)
-            assert response[0] == 0x00
+
+        send_fragmented(client, query_packet(ordinary_queries[0]))
+        _, response = recv_packet(client)
+        assert response[0] == 0x00
+
+        send_fragmented(client, query_packet(b"SET NF_MODE = 2NF;"))
+        sequence_id, response = recv_packet(client)
+        assert sequence_id == 1
+        assert response[0] == 0x00
+
+        send_fragmented(client, query_packet(b"SHOW NF_MODE;"))
+        sequence_id, result_header = recv_packet(client)
+        assert sequence_id == 1
+        assert result_header == b"\x01\x01"  # FULL metadata, one column
+        sequence_id, column_definition = recv_packet(client)
+        assert sequence_id == 2
+        assert b"NF_MODE" in column_definition
+        sequence_id, row = recv_packet(client)
+        assert sequence_id == 3
+        assert row == b"\x032NF"
+        sequence_id, result_end = recv_packet(client)
+        assert sequence_id == 4
+        assert result_end == b"\xfe\x00\x00\x02\x00\x00\x00"
+
+        send_fragmented(client, query_packet(b"SET NF_MODE = 1NF;"))
+        sequence_id, response = recv_packet(client)
+        assert sequence_id == 1
+        assert response[0] == 0xFF
+        assert response[4:9] == b"42000"
+
+        send_fragmented(client, query_packet(ordinary_queries[1]))
+        _, response = recv_packet(client)
+        assert response[0] == 0x00
 
         send_fragmented(client, packet(0, b"\x01"))
 
     assert backend_done.wait(2), "fake backend did not finish"
     assert not backend_errors, backend_errors
-    assert seen_queries == queries, "proxy did not forward query bytes unchanged"
+    expected_forwarded_queries = [b"\x00\x01" + query for query in ordinary_queries]
+    assert seen_queries == expected_forwarded_queries, (
+        "proxy should forward ordinary SQL unchanged and keep NF commands local"
+    )
     print("SMOKE TEST PASSED")
     print("forwarded query sizes:", [len(query) for query in seen_queries])
 finally:
