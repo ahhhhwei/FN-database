@@ -1,4 +1,3 @@
 build/
 docs/*
-!docs/antlr-demo/
-!docs/antlr-demo/**
+generated/*
