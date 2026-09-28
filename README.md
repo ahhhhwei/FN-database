@@ -60,8 +60,6 @@ SHOW NF_MODE;
 - 兼容 MySQL 8 客户端通过 `CLIENT_QUERY_ATTRIBUTES` 发送的空查询属性头；
 - 普通 MySQL SQL 不进入 NF Parser，仍然透明转发给后端。
 
-正式 grammar 位于 `grammar/FNCommand.g4`，生成的 C++ Lexer / Parser 位于 `generated/`。学习用的完整 Demo 位于 [`docs/antlr-demo/`](docs/antlr-demo/README.md)。两者共用 `third_party/` 中的 ANTLR Generator 和 C++ Runtime 4.13.2。
-
 修改正式 grammar 后，在仓库根目录重新生成：
 
 ```bash
