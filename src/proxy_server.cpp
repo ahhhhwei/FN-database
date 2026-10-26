@@ -15,18 +15,18 @@ namespace fn
     ProxyServer::ProxyServer(boost::asio::io_context &io_context, const Config &config)
         : io_context_(io_context), acceptor_(io_context), config_(config)
     {
-        // 字符串 IP 转地址
+        // make_address 只接受数字形式 IPv4/IPv6；非法输入会抛出异常并由 main 捕获。
         const auto listen_address = boost::asio::ip::make_address(config_.listen_host);
-        // endpoint = ip + port
+
+        // endpoint 是“IP 地址 + TCP 端口”的组合。
         const boost::asio::ip::tcp::endpoint endpoint(listen_address, config_.listen_port);
 
-        // 创建 TCP socket
+        // acceptor 的典型初始化顺序：open -> set_option -> bind -> listen。
         acceptor_.open(endpoint.protocol());
-        // 设置端口复用
+        // 允许程序重启后尽快重新绑定仍处于 TIME_WAIT 相关状态的监听端口。
         acceptor_.set_option(boost::asio::socket_base::reuse_address(true));
-        // 将 endpoint 绑定到 socket
         acceptor_.bind(endpoint);
-        // 监听 socket
+        // 使用系统允许的最大等待连接队列长度。
         acceptor_.listen(boost::asio::socket_base::max_listen_connections);
     }
 
@@ -41,16 +41,20 @@ namespace fn
 
     void ProxyServer::doAccept()
     {
-        // 异步等待客户端连接
+        // async_accept 立即返回。连接到来后，io_context 才执行这个 lambda。
+        // lambda 捕获 this，因此 ProxyServer 必须比所有挂起的 accept 操作活得更久。
         acceptor_.async_accept([this](const boost::system::error_code &error, boost::asio::ip::tcp::socket client_socket)
                                {
         if (!error) {
+            // make_shared 创建会话；start 内部的异步回调会继续持有 shared_ptr。
             std::make_shared<ProxySession>(std::move(client_socket), io_context_, config_)->start();
         }
         else if (error != boost::asio::error::operation_aborted) {
+            // 服务器正常关闭 acceptor 时会得到 operation_aborted，不需要当成故障打印。
             std::cerr << "[ERROR] Accept failed: " << error.message() << '\n';
         }
 
+        // 每次 async_accept 只接受一个连接，所以回调末尾继续挂起下一次等待。
         if (acceptor_.is_open()) {
             doAccept();
         } });

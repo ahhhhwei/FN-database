@@ -159,3 +159,341 @@ python3 tests/smoke_fake_mysql.py
 ```
 
 冒烟测试会启动一个假的 MySQL 后端，验证普通 SQL 原样转发、范式命令不进入后端，以及 `SHOW NF_MODE` 返回当前连接的模式。
+
+## 详细语法
+一个函数依赖集定义为：`FDSET = (U, F)`，其中，`U`：逻辑属性全集，`F`：用户声明的函数依赖集合。
+
+### 一、FDSET 生命周期
+
+#### 1.1  FDSET 创建
+
+##### 1.1.1 创建空函数依赖集
+
+```sql
+CREATE FDSET xxx;
+```
+
+##### 1.1.2 创建完整函数依赖集
+
+```sql
+CREATE FDSET xxx (
+    ATTRIBUTES [A B C D E F G],
+    DEFINE f1 [B] -> [C D],
+    DEFINE f2 [D] -> [G]
+);
+```
+
+其中：
+
+- `ATTRIBUTES`：定义逻辑属性全集 `U`
+- `DEFINE`：定义一条函数依赖
+- `f1 / f2`：函数依赖名称
+- `[B]`：决定因素
+- `[C D]`：被决定属性
+
+##### 1.1.3 匿名函数依赖
+
+函数依赖名称可以省略：
+
+```sql
+CREATE FDSET xxx (
+    ATTRIBUTES [A B C D E],
+    DEFINE [A] -> [B C],
+    DEFINE [C] -> [D]
+);
+```
+
+系统自动生成名称：
+
+```
+f1
+f2
+```
+
+自动生成的 FD 名称必须在当前 FDSET 中唯一。
+
+#### 1.2 FDSET 删除与清空
+
+##### 1.2.1 删除函数依赖集
+
+删除整个 `FDSET`，包括属性全集、函数依赖和相关元数据。
+
+```sql
+DROP FDSET xxx;
+```
+
+如果该 `FDSET` 当前处于激活状态，应先执行：
+
+```sql
+DEACTIVATE FDSET;
+```
+
+##### 1.2.2 清空函数依赖
+
+`TRUNCATE FDSET` 清空函数依赖及其 `ATTRIBUTES`。
+
+```sql
+TRUNCATE FDSET xxx;
+```
+
+### 二、FDSET 状态与查询
+
+#### 2.1 FDSET 激活
+
+##### 2.1.1 激活函数依赖集
+
+```sql
+ACTIVATE FDSET xxx;
+```
+
+一个数据库同一时间最多激活一个 `FDSET`。激活之后，`FN-DB` 使用该函数依赖集对后续关系模式进行检查。
+
+##### 2.1.2 取消激活
+
+```sql
+DEACTIVATE FDSET;
+```
+
+#### 2.2 FDSET 查询
+
+##### 2.2.1 查看指定 FDSET
+
+```sql
+SHOW FDSET xxx;
+```
+
+示例输出：
+
+```
+FDSET: xxx
+ATTRIBUTES:
+A B C D E F G
+FUNCTIONAL DEPENDENCIES:
+f1 : B -> C D
+f2 : D -> G
+```
+
+##### 2.2.2 查看所有 FDSET
+
+```sql
+SHOW FDSET LIST;
+```
+
+示例：
+
+```
+NAME        STATUS
+xxx         ACTIVE
+yyy         INACTIVE
+zzz         INACTIVE
+```
+
+##### 2.2.3 查看当前激活的 FDSET
+
+```sql
+SHOW FDSET ACTIVATED;
+```
+
+### 三、逻辑属性、函数依赖管理
+
+#### 3.1 修改逻辑属性
+
+##### 3.1.1 增加属性
+
+```sql
+ALTER FDSET xxx
+ADD ATTRIBUTE H;
+```
+
+##### 3.1.2 删除属性
+
+```sql
+ALTER FDSET xxx
+DROP ATTRIBUTE H;
+```
+
+如果属性 H 当前出现在函数依赖中，或被某个物理字段映射，则不允许直接删除。
+
+##### 3.1.3 修改属性名称
+
+```sql
+ALTER FDSET xxx
+RENAME ATTRIBUTE H TO I;
+```
+
+修改后，需要同步更新函数依赖中的属性名与物理字段映射关系。
+
+#### 3.2 修改函数依赖
+
+##### 3.2.1 添加命名函数依赖
+
+```sql
+ALTER FDSET xxx
+ADD FD f3 [A] -> [E];
+```
+
+##### 3.2.2 添加匿名函数依赖
+
+```sql
+ALTER FDSET xxx
+ADD FD [A] -> [E];
+```
+
+##### 3.2.3 删除函数依赖
+
+```sql
+ALTER FDSET xxx
+DROP FD f3;
+```
+
+##### 3.2.4 修改函数依赖名称
+
+```sql
+ALTER FDSET xxx
+RENAME FD f2 TO dependency_d_g;
+```
+
+##### 3.2.5 修改函数依赖内容
+
+```sql
+ALTER FDSET xxx
+MODIFY FD f1 TO [B] -> [C];
+```
+
+#### 3.3 逻辑属性与物理字段映射
+
+FN-DB 中 A、B、C、D ... 属于逻辑属性；MySQL 表中的列属于物理字段。
+
+##### 3.3.1 CREATE TABLE 时映射
+
+```sql
+CREATE TABLE X (
+    COL_A INT AUTO_INCREMENT PRIMARY KEY MAP TO A,
+    COL_B INT MAP TO B,
+    COL_C VARCHAR(10) MAP TO C,
+    COL_D BOOLEAN MAP TO D,
+    COL_G INT MAP TO G
+);
+```
+
+FN-DB 内部记录：
+
+```
+X.COL_A -> A
+X.COL_B -> B
+X.COL_C -> C
+X.COL_D -> D
+X.COL_G -> G
+```
+
+##### 3.3.2 同名属性自动映射
+
+如果物理字段名称与逻辑属性名称一致，可以省略 `MAP TO`：
+
+```sql
+CREATE TABLE X (
+    A INT PRIMARY KEY,
+    B INT,
+    C VARCHAR(10),
+    D BOOLEAN
+);
+```
+
+如果当前激活的 FD_SET 中存在 A、B、C、D，则自动建立：
+
+```
+X.A -> A
+X.B -> B
+X.C -> C
+X.D -> D
+```
+
+##### 3.3.3 多张表映射到同一个逻辑属性
+
+```sql
+CREATE TABLE X (
+    COL_A INT PRIMARY KEY MAP TO A
+);
+CREATE TABLE Y (
+    USER_A INT MAP TO A
+);
+```
+
+此时：
+
+```
+X.COL_A -> A
+Y.USER_A -> A
+```
+
+逻辑上二者都表示属性 A。
+
+#### 3.4 已存在表的属性映射
+
+##### 3.4.1 添加映射
+
+```sql
+ALTER MAPSET X ADD MAP COL_A TO A;
+```
+
+##### 3.4.2 解除映射
+
+```sql
+ALTER MAPSET X DROP MAP COL_A;
+```
+
+##### 3.4.3 修改映射
+
+```sql
+ALTER MAPSET X REMAP MAP COL_A TO B;
+```
+
+##### 3.4.4 查看表映射
+
+```sql
+SHOW MAPPSET X;
+```
+
+示例：
+
+```
+PHYSICAL COLUMN     LOGICAL ATTRIBUTE
+COL_A               A
+COL_B               B
+COL_C               C
+COL_D               D
+```
+
+#### 四、 范式模式
+
+`FDSET` 激活状态与范式等级分开管理。
+
+##### 4.1 开启 2NF
+
+```sql
+SET NF_MODE = 2NF;
+```
+
+##### 4.2 开启 3NF
+
+```sql
+SET NF_MODE = 3NF;
+```
+
+##### 4.3 开启 BCNF
+
+```sql
+SET NF_MODE = BCNF;
+```
+
+##### 4.4 关闭范式约束
+
+```sql
+SET NF_MODE = OFF;
+```
+
+##### 4.5 查看当前模式
+
+```sql
+SHOW NF_MODE;
+```

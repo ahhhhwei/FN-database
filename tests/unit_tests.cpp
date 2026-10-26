@@ -11,8 +11,11 @@
 #include <variant>
 #include <vector>
 
+// 本文件不依赖第三方测试框架：每个 test* 函数是一组断言，main 依次调用。
+// 这样 Demo 的依赖更少，也便于直接观察协议字节和 Parser 返回值。
 namespace {
 
+// 最小断言工具。失败立即结束进程，使 CTest 将该测试标记为失败。
 void require(bool condition, const char* message)
 {
     if (!condition) {
@@ -21,6 +24,7 @@ void require(bool condition, const char* message)
     }
 }
 
+// 仅供测试构造 Classic Protocol 包：三字节 payload 长度、sequence id、payload。
 std::vector<char> mysqlPacket(std::uint8_t sequence_id, const std::string& payload)
 {
     const std::size_t size = payload.size();
@@ -34,6 +38,8 @@ std::vector<char> mysqlPacket(std::uint8_t sequence_id, const std::string& paylo
     return packet;
 }
 
+// 响应构造函数返回的是连续字节；通过生产代码的 Decoder 再拆回包，
+// 便于按 sequence id 和 payload 内容做断言。
 std::vector<fn::protocol::MysqlPacket> decodePackets(
     const std::vector<std::uint8_t>& bytes)
 {
@@ -41,8 +47,10 @@ std::vector<fn::protocol::MysqlPacket> decodePackets(
     return decoder.feed(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 }
 
+// 验证包重编码和三类本地服务端响应：OK、ERR、单列 Result Set。
 void testPacketResponseEncoding()
 {
+    // encode -> decode 应保持序号和 payload 完全不变。
     const fn::protocol::MysqlPacket original{
         7,
         std::vector<std::uint8_t>{0x03U, 'S', 'E', 'L', 'E', 'C', 'T'},
@@ -54,12 +62,14 @@ void testPacketResponseEncoding()
     require(round_trip[0].payload == original.payload,
             "encoded packet should preserve payload");
 
+    // Protocol 4.1 OK payload 固定至少七字节，首字节为 0x00。
     const auto ok = decodePackets(fn::protocol::makeMysqlOkResponse(1));
     require(ok.size() == 1 && ok[0].sequence_id == 1,
             "OK response should contain sequence 1");
     require(ok[0].payload.size() == 7 && ok[0].payload[0] == 0x00U,
             "OK response should have a protocol-41 OK payload");
 
+    // ERR payload 以 0xff 开头，并在错误码之后使用 '#' 引出 SQLSTATE。
     const auto error = decodePackets(fn::protocol::makeMysqlErrorResponse(
         1, 1064, "42000", "bad NF command"));
     require(error.size() == 1 && error[0].payload[0] == 0xffU,
@@ -67,6 +77,7 @@ void testPacketResponseEncoding()
     require(error[0].payload[3] == '#' && error[0].payload[4] == '4',
             "error response should contain a SQLSTATE marker");
 
+    // 旧客户端的结果集：列数、列定义、元数据 EOF、数据行、行 EOF，共五包。
     const auto legacy_result = decodePackets(
         fn::protocol::makeMysqlSingleColumnResultSet(
             1, "NF_MODE", "BCNF", false, false));
@@ -81,6 +92,8 @@ void testPacketResponseEncoding()
                 std::vector<std::uint8_t>({0x04U, 'B', 'C', 'N', 'F'}),
             "result set row should contain the current mode");
 
+    // 新客户端协商 DEPRECATE_EOF 后省略元数据 EOF，并用 OK-as-EOF 收尾。
+    // OPTIONAL_RESULTSET_METADATA 还会在列数之前增加 metadata_follows=1。
     const auto modern_result = decodePackets(
         fn::protocol::makeMysqlSingleColumnResultSet(
             1, "NF_MODE", "2NF", true, true));
@@ -97,6 +110,7 @@ void testPacketResponseEncoding()
             "modern result set should end with an OK-as-EOF packet");
 }
 
+// TCP 可能把一个 MySQL 包拆成任意片段；逐字节 feed 是最极端的合法情况。
 void testPacketDecoderHandlesArbitraryFragments()
 {
     fn::protocol::MysqlPacketDecoder decoder;
@@ -104,6 +118,7 @@ void testPacketDecoderHandlesArbitraryFragments()
     std::vector<fn::protocol::MysqlPacket> decoded;
 
     for (const char byte : encoded) {
+        // make_move_iterator 将临时结果中的 vector payload 移入 decoded，避免复制。
         auto packets = decoder.feed(&byte, 1);
         decoded.insert(decoded.end(),
                        std::make_move_iterator(packets.begin()),
@@ -117,6 +132,7 @@ void testPacketDecoderHandlesArbitraryFragments()
             "packet payload should be preserved");
 }
 
+// 反方向也可能发生：一次 read_some 同时返回多个完整 MySQL 包（TCP 粘包）。
 void testPacketDecoderHandlesCoalescedPackets()
 {
     fn::protocol::MysqlPacketDecoder decoder;
@@ -132,6 +148,7 @@ void testPacketDecoderHandlesCoalescedPackets()
             "second coalesced payload should match");
 }
 
+// SET 语句的公共断言：既要解析成功，也要生成正确的 AST 枚举。
 void requireSetMode(std::string_view sql,
                     fn::sql::NFMode expected_mode,
                     const char* message)
@@ -143,6 +160,7 @@ void requireSetMode(std::string_view sql,
     require(statement.mode == expected_mode, "SET NF_MODE should map to the expected mode");
 }
 
+// 覆盖四种模式、大小写、可选分号、注释和 AST 日志格式化。
 void testSetModes()
 {
     requireSetMode("SET NF_MODE = 2NF;", fn::sql::NFMode::second,
@@ -159,6 +177,7 @@ void testSetModes()
             "SET NF_MODE description should match");
 }
 
+// SHOW 应生成与 SetModeStatement 不同的 variant 分支。
 void testShowMode()
 {
     const auto result = fn::sql::parse("SHOW NF_MODE;");
@@ -170,8 +189,10 @@ void testShowMode()
             "SHOW NF_MODE description should match");
 }
 
+// 分流规则非常重要：普通 MySQL SQL 要透传，只有疑似 FN SQL 才严格报错。
 void testPassThroughAndErrors()
 {
+    // SELECT、MySQL 自己的 SET/SHOW 均不属于 FN grammar。
     const auto ordinary = fn::sql::parse("SELECT * FROM users");
     require(ordinary.status == fn::sql::ParseStatus::not_fn_statement,
             "ordinary SQL should remain outside the FN parser");
@@ -188,6 +209,7 @@ void testPassThroughAndErrors()
     require(old_syntax.status == fn::sql::ParseStatus::not_fn_statement,
             "the old demo syntax should no longer be recognized");
 
+    // 以 SET NF_MODE 开头但值非法时，应返回 error 而不是悄悄透传。
     const auto unsupported_mode = fn::sql::parse("SET NF_MODE = 1NF;");
     require(unsupported_mode.status == fn::sql::ParseStatus::error,
             "unsupported 1NF mode should fail");
@@ -201,6 +223,7 @@ void testPassThroughAndErrors()
             "missing mode should fail");
 
     const auto trailing_input = fn::sql::parse("SHOW NF_MODE unexpected;");
+    // grammar 顶层使用 EOF，因此合法前缀之后的垃圾输入也必须失败。
     require(trailing_input.status == fn::sql::ParseStatus::error,
             "trailing input should fail because the grammar checks EOF");
 }
@@ -209,6 +232,7 @@ void testPassThroughAndErrors()
 
 int main()
 {
+    // 从底层协议到上层 SQL 依次执行，某一项失败会由 require 立即终止。
     testPacketResponseEncoding();
     testPacketDecoderHandlesArbitraryFragments();
     testPacketDecoderHandlesCoalescedPackets();
